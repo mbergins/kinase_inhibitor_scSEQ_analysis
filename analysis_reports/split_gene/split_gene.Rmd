@@ -1,0 +1,143 @@
+---
+title: "Kinase Inhibitor Single Cell Analysis"
+author: "Matthew Berginski"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(here)
+library(tidyverse)
+library(broom)
+library(tictoc)
+```
+
+# Read In Data
+
+```{r read_in_data}
+all_data = rbind(
+  read.delim(here('raw_data/matrix_DMSO_2.txt.gz')) %>%
+    rename(gene_name = X) %>% 
+    gather("cell_id","count",-gene_name) %>%
+    mutate(treatment = "DMSO"),
+  
+  read.delim(here('raw_data/matrix_JQ1_2.txt.gz')) %>%
+    rename(gene_name = X) %>%
+    gather("cell_id","count",-gene_name) %>%
+    mutate(treatment = "JQ1"),
+  
+  read.delim(here('raw_data/matrix_TRAMET_2.txt.gz')) %>%
+    rename(gene_name = X) %>%
+    gather("cell_id","count",-gene_name) %>%
+    mutate(treatment = "GSK"),
+  
+  read.delim(here('raw_data/matrix_COMBO_2.txt.gz')) %>%
+    rename(gene_name = X) %>%
+    gather("cell_id","count",-gene_name) %>%
+    mutate(treatment = "combo")
+)
+```
+
+```{r}
+genes_with_reads = all_data %>%
+  group_by(gene_name) %>%
+  summarise(total_reads = sum(count)) %>%
+  filter(total_reads > 0)
+
+CCNB1_present = all_data %>%
+  filter(gene_name == "CCNB1") %>%
+  group_by(cell_id) %>%
+  summarise(CCNB1_present = ifelse(count > 0, TRUE, FALSE))
+
+all_data_filtered = all_data %>% 
+  filter(gene_name %in% genes_with_reads$gene_name) %>%
+  left_join(CCNB1_present)
+```
+
+```{r}
+# test_for_gene_diffs_wilcox <- function(this_data_set) {
+#   return(tidy(wilcox.test(count ~ CCNB1_present, this_data_set))$p.value)
+# }
+# 
+# test_for_gene_diffs_t_test <- function(this_data_set) {
+#   return(tidy(t.test(count ~ CCNB1_present, this_data_set))$p.value)
+# }
+# 
+# temp = all_data_filtered %>% filter(gene_name %in% genes_with_reads$gene_name[1:2000])
+
+tic()
+# pb <- progress_estimated(length(unique(all_data_filtered$gene_name))*length(unique(all_data_filtered$treatment)))
+CCNB1_comparison = all_data_filtered %>%
+  group_by(gene_name,treatment) %>%
+  nest(count,CCNB1_present) %>%
+  mutate(p_val_wilcox = map(data, test_for_gene_diffs_wilcox),
+         p_val_t_test = map(data, test_for_gene_diffs_t_test)) %>%
+  select(-data) %>%
+  unnest(p_val_wilcox,p_val_t_test)
+toc()
+```
+
+# Gene Split Analysis
+
+```{r CCNB1}
+CCNB1_present = all_data %>%
+  filter(gene_name == "CCNB1") %>%
+  group_by(cell_id) %>%
+  summarise(CCNB1_present = ifelse(count > 0, TRUE, FALSE))
+
+DMSO_CCNB1 = all_data %>%
+  left_join(CCNB1_present) %>%
+  filter(treatment == "DMSO")
+
+combo_CCNB1 = all_data %>%
+  left_join(CCNB1_present) %>%
+  filter(treatment == "combo")
+
+GSK_CCNB1 = all_data %>%
+  left_join(CCNB1_present) %>%
+  filter(treatment == "GSK")
+
+JQ1_CCNB1 = all_data %>%
+  left_join(CCNB1_present) %>%
+  filter(treatment == "JQ1")
+
+gene_list = unique(all_data$gene_name)
+
+CCNB1_comparison = tibble(gene = character(),
+                          treatment = character(),
+                          p_val = numeric())
+
+test_for_gene_diffs_by_CCNB1 <- function(gene, data_set) {
+  this_data_set = data_set %>% filter(gene_name == gene)
+  return(tidy(wilcox.test(count ~ CCNB1_present, this_data_set))$p.value)
+}
+
+library(progress)
+pb <- progress_bar$new(
+  format = "[:bar] :percent in :elapsed :eta",
+  total = length(gene_list[1:100]), clear = FALSE)
+
+for (this_gene in gene_list[1:100]) {
+
+  CCNB1_comparison = CCNB1_comparison %>% 
+    add_row(gene = this_gene,
+            treatment = "DMSO",
+            p_val = test_for_gene_diffs_by_CCNB1(this_gene,DMSO_CCNB1))
+
+  CCNB1_comparison = CCNB1_comparison %>% 
+    add_row(gene = this_gene,
+            treatment = "combo",
+            p_val = test_for_gene_diffs_by_CCNB1(this_gene,combo_CCNB1))
+  
+  CCNB1_comparison = CCNB1_comparison %>% 
+    add_row(gene = this_gene,
+            treatment = "GSK",
+            p_val = test_for_gene_diffs_by_CCNB1(this_gene,GSK_CCNB1))
+  
+  CCNB1_comparison = CCNB1_comparison %>% 
+    add_row(gene = this_gene,
+            treatment = "JQ1",
+            p_val = test_for_gene_diffs_by_CCNB1(this_gene,JQ1_CCNB1))
+  pb$tick()
+}
+
+```
