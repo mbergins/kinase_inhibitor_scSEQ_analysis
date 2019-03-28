@@ -1,19 +1,11 @@
----
-title: "Kinase Inhibitor Single Cell Analysis"
-author: "Matthew Berginski"
-output: github_document
----
+Kinase Inhibitor Single Cell Analysis
+================
+Matthew Berginski
 
-```{r setup, include=FALSE}
-library(here)
-library(tidyverse)
-library(broom)
-library(tictoc)
-```
+Read In Data
+============
 
-# Read In Data
-
-```{r read_in_data}
+``` r
 all_data = rbind(
   read.delim(here('raw_data/matrix_DMSO_2.txt.gz')) %>%
     rename(gene_name = X) %>% 
@@ -40,7 +32,7 @@ all_data$treatment = as.factor(all_data$treatment)
 all_data$cell_id = as.factor(all_data$cell_id)
 ```
 
-```{r }
+``` r
 genes_with_reads = all_data %>%
   group_by(gene_name) %>%
   summarise(total_reads = sum(count)) %>%
@@ -56,7 +48,9 @@ all_data_filtered = all_data %>%
   left_join(CCNB1_present)
 ```
 
-```{r CCNB1_split}
+    ## Joining, by = "cell_id"
+
+``` r
 test_for_gene_diffs_wilcox <- function(this_data_set) {
   return(tidy(wilcox.test(count ~ CCNB1_present, this_data_set))$p.value)
 }
@@ -75,12 +69,16 @@ CCNB1_comparison = all_data_filtered %>%
   select(-data) %>%
   unnest(p_val_wilcox,p_val_t_test)
 toc()
+```
 
+    ## 540.982 sec elapsed
+
+``` r
 CCNB1_comparison$p_val_t_test_adjust = p.adjust(CCNB1_comparison$p_val_t_test,method = "fdr")
 CCNB1_comparison$p_val_wilcox_adjust = p.adjust(CCNB1_comparison$p_val_wilcox,method = "fdr")
 ```
 
-```{r general_vals}
+``` r
 num_diff = CCNB1_comparison %>%
   group_by(treatment) %>%
   summarise(num_signif_genes = sum(p_val_wilcox_adjust < 0.05, na.rm=T),
@@ -94,7 +92,7 @@ number_of_times_signif = CCNB1_comparison %>%
   summarise(signif_count = sum(p_val_wilcox_adjust < 0.05, na.rm=T))
 ```
 
-```{r GSKvsDMSO}
+``` r
 DMSO_genes = CCNB1_comparison %>%
   filter(treatment == "DMSO",p_val_wilcox_adjust < 0.05)
   
@@ -115,6 +113,11 @@ DMSO_genes = DMSO_genes %>%
   arrange(desc(expression_diff)) %>%
   select(-p_val_wilcox,-p_val_t_test) %>%
   mutate_if(is.numeric,funs(signif(.,4)))
+```
+
+    ## Joining, by = c("gene_name", "treatment")
+
+``` r
 write_csv(DMSO_genes,here('analysis_reports/split_gene/DMSO_hits.csv'))
 
 GSK_genes = GSK_genes %>%
@@ -122,6 +125,11 @@ GSK_genes = GSK_genes %>%
   arrange(desc(expression_diff)) %>%
   select(-p_val_wilcox,-p_val_t_test) %>%
   mutate_if(is.numeric,funs(signif(.,4)))
+```
+
+    ## Joining, by = c("gene_name", "treatment")
+
+``` r
 write_csv(GSK_genes,here('analysis_reports/split_gene/GSK_hits.csv'))
 
 only_GSK_genes = only_GSK_genes %>% 
@@ -129,6 +137,11 @@ only_GSK_genes = only_GSK_genes %>%
   arrange(desc(expression_diff)) %>%
   select(-p_val_wilcox,-p_val_t_test) %>%
   mutate_if(is.numeric,funs(signif(.,4)))
+```
+
+    ## Joining, by = c("gene_name", "treatment")
+
+``` r
 write_csv(only_GSK_genes,here('analysis_reports/split_gene/only_GSK_hits.csv'))
 
 library(DarkKinaseTools)
@@ -137,8 +150,12 @@ only_GSK_kinases = only_GSK_genes %>%
   filter(gene_name %in% DarkKinaseTools::dark_kinases$symbol)
 ```
 
-```{r}
+``` r
 ggplot(all_data_filtered %>% filter(treatment == "GSK",gene_name == "SELENOP"), 
        aes(x=count, y=stat(density), color=CCNB1_present)) + 
   geom_freqpoly()
 ```
+
+    ## `stat_bin()` using `bins = 30`. Pick better value with `binwidth`.
+
+![](split_gene_files/figure-markdown_github/unnamed-chunk-2-1.png)
