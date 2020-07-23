@@ -1,0 +1,339 @@
+---
+title: "Trametinib Treatment Single Cell Analysis"
+author: "Matthew Berginski"
+date: "`r date()`"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(scRNAseq)
+library(SingleCellExperiment)
+library(scater)
+library(here)
+library(tidyverse)
+library(janitor)
+library(glue)
+
+library(BerginskiRMisc)
+library(DarkKinaseTools)
+```
+
+```{r, filter out cells with high mito, cache=TRUE, include=F}
+DMSO <- SingleCellExperiment(assays = 
+                               list(counts = read_delim(here('raw_data/matrix_DMSO_2.txt.gz'), delim = "\t") %>%
+                                      column_to_rownames(var = "X1") %>% 
+                                      as.matrix()))
+
+is.mito <- grepl("^MT-", rownames(DMSO))
+qcstats <- perCellQCMetrics(DMSO, subsets=list(Mito=is.mito))
+DMSO_filter_set <- quickPerCellQC(qcstats, percent_subsets="subsets_Mito_percent")
+DMSO <- DMSO[, ! DMSO_filter_set$discard]
+
+Tramet <- SingleCellExperiment(assays = 
+                                 list(counts = read_delim(here('raw_data/matrix_TRAMET_2.txt.gz'), delim = "\t") %>%
+                                        column_to_rownames(var = "X1") %>% 
+                                        as.matrix()))
+
+is.mito <- grepl("^MT-", rownames(Tramet))
+qcstats <- perCellQCMetrics(Tramet, subsets=list(Mito=is.mito))
+Tramet_filter_set <- quickPerCellQC(qcstats, percent_subsets="subsets_Mito_percent")
+Tramet <- Tramet[, ! Tramet_filter_set$discard]
+```
+
+## Data Cleaning/Normalization
+
+The single cell data sets were pre-processed using cellranger and count matrices produced. Starting with the count matrices, I removed cells with especially high mitochondrial gene counts:
+
+* DMSO: `r sum(DMSO_filter_set$discard)` removed / `r length(DMSO_filter_set$discard)` total
+* Trametinib: `r sum(Tramet_filter_set$discard)` removed / `r length(Tramet_filter_set$discard)` total
+
+One clear problem is the imbalance in the number of cells captured in each run. This shouldn't affect the downstream analysis, but might limit the differences we can detect.
+
+```{r, tidy data, include=F, cache = TRUE}
+all_data = rbind(
+  DMSO@assays@data$counts %>%
+    as.data.frame() %>%
+    rownames_to_column(var = "gene_name") %>%
+    gather("cell_id","count",-gene_name) %>%
+    mutate(cell_id = as.factor(cell_id),
+           gene_name = as.factor(gene_name)) %>%
+    mutate(treatment = "DMSO"),
+  
+  Tramet@assays@data$counts %>%
+    as.data.frame() %>%
+    rownames_to_column(var = "gene_name") %>%
+    gather("cell_id","count",-gene_name) %>%
+    mutate(cell_id = as.factor(cell_id),
+           gene_name = as.factor(gene_name)) %>%
+    mutate(treatment = "Trametinib")
+) %>% mutate(treatment = as.factor(treatment))
+
+DMSO <- NULL
+Tramet <- NULL
+```
+
+```{r counts by cell, include=F, cache=TRUE}
+all_cell_counts = all_data %>%
+  group_by(cell_id, treatment) %>%
+  summarise(per_cell_read_count = sum(count))
+```
+
+Let's take a look at the number of reads assigned to each cell, splitting the data by the treatment type:
+
+```{r read counts by cell, echo = F}
+ggplot(all_cell_counts, aes(x=per_cell_read_count)) + 
+  geom_freqpoly(aes(color=treatment), bins = 100) + 
+  scale_color_brewer(type = 'div', palette = "Dark2") +
+  labs(x = "Total Reads Per Cell", 
+       y = "Number of Cells",
+       color = "") +
+  theme_berginski()
+```
+
+Nothing too surprising here, the fewer Trametinib cells has resulted in a higher average sequencing depth per cell. This might prove to be a problem in dealing with very low count genes (like the kinases). There aren't any clear outliers in terms of the cells present, so we won't do any other cell filtering. Now I'll normalize each cell to the 75 percentile of the reads per cell to allow comparisons between the counts in each cell.
+
+```{r norm each cell, include = F}
+target_count = round(quantile(all_cell_counts$per_cell_read_count, 0.75));
+
+all_data = all_data %>% 
+  left_join(all_cell_counts) %>%
+  mutate(norm_count = (count/per_cell_read_count)*target_count)
+```
+
+## Kinases Present in Normalized Data
+
+```{r kinases filtering, include = F, cache=TRUE}
+all_data_kinases = all_data %>% 
+  filter(gene_name %in% all_kinases$symbol)
+
+all_data_dark_kinases = all_data_kinases %>%
+  filter(gene_name %in% dark_kinases$symbol)
+
+missing_DK = dark_kinases %>%
+  filter(! symbol %in% unique(all_data_dark_kinases$gene_name))
+
+kinases_present = all_data %>%
+  group_by(cell_id, treatment) %>%
+  summarise(kinase_present = ifelse(
+    any(norm_count >= 1 & gene_name %in% all_kinases$symbol),
+    TRUE,
+    FALSE),
+    kinase_count = sum(norm_count >= 1 & gene_name %in% all_kinases$symbol))
+```
+
+Just a quick look at the kinases that have some evidence of expression. I'm setting this level at seeing at least a normalized count of 1 or greater in a specific cell. Every cell in the DMSO and Trametinib treatments have a kinase with at least 1 read. Nearly all of the kinases in my master list are present in at least one cell with at least one count (`r length(unique(all_data_kinases$gene_name))` total, `r length(unique(all_data_dark_kinases$gene_name))` dark kinases). Here's the distribution of kinase counts on a per cell basis:
+
+```{r number of kinases, echo = F}
+ggplot(kinases_present, aes(x=kinase_count, color=treatment)) + 
+  geom_freqpoly(aes(y=..density..), bins = 30) +
+  labs(x = "Number of Kinases/Cell", y = "Fraction of Cells", color="") + 
+  scale_color_brewer(type = 'div', palette = "Dark2") +
+  theme_berginski()
+```
+
+Overall the distributions look pretty similar for the kinases between DMSO and Trametinib. Let's move onto trying to detect different expression patterns.
+
+## Genome Wide Expression Changes
+
+It's sort of the wild-west when it comes to calling gene expression changes from single cell sequencing data, so I pieced together some techniques that made the most sense. First off, all the comparisons are made with the per-cell normalized count values. Otherwise, I used the wilcox test to look for genes with differential expression levels. I also calculated the log 2 fold change in average expression, which raises a bit of a complication for single cell sequencing. Since the sequencing depth per cell isn't very high, low prevalence transcripts are often missed. In practice, this means I've got lots of mean zero counts in both the DMSO and Trametinib, but the resulting infinite fold change values aren't all that interesting. To combat these infinite values, I decided to toss out the all the fold changes when either treatment was zero, except when the other treatment was showing up in at least 5 percent of the cell. I choose 5 percent somewhat arbitrarily, but I figure if there is no evidence of expression while the gene shows up in 5 percent of cells in the other treatment, that gene shouldn't be removed. 
+
+```{r expression changes, include = F, cache=TRUE}
+expression_changes = all_data %>%
+  group_by(gene_name, treatment) %>%
+  summarise(mean_expression = mean(norm_count),
+            expression_pos_percent = mean(norm_count >= 1)) %>%
+  pivot_wider(names_from = treatment, values_from = c(mean_expression, expression_pos_percent)) %>%
+  mutate(fold_change = log2(mean_expression_Trametinib/mean_expression_DMSO)) %>%
+  mutate(fold_change_inf = case_when(
+    fold_change == Inf  ~ ifelse(expression_pos_percent_Trametinib > 0.05, Inf, NaN),
+    fold_change == -Inf ~ ifelse(expression_pos_percent_DMSO > 0.05, -Inf, NaN),
+    TRUE ~ fold_change
+  ))
+```
+
+```{r wilcox test for distribution diffs, include=F, cache=TRUE}
+test_for_gene_diffs_wilcox <- function(this_data_set) {
+  return(broom::tidy(wilcox.test(norm_count ~ treatment, this_data_set))$p.value)
+}
+
+expression_diff_tests = all_data %>%
+  # filter(gene_name %in% genes_to_test$gene_name) %>%
+  select(gene_name,treatment,norm_count) %>%
+  group_by(gene_name) %>%
+  nest() %>%
+  mutate(p_val_wilcox = map_dbl(data, test_for_gene_diffs_wilcox)) %>%
+  select(-data) %>%
+  unnest(p_val_wilcox)
+
+expression_diff_tests$p_val_wilcox_adjust = p.adjust(expression_diff_tests$p_val_wilcox,method = "fdr")
+```
+
+```{r combine expression, include=F, cache=TRUE}
+combined_expression = expression_diff_tests %>% left_join(expression_changes)
+
+differential_expression = combined_expression %>%
+  filter(p_val_wilcox_adjust <= 0.05 & abs(fold_change_inf) >= 1)
+
+differential_expression_kinases = differential_expression %>%
+  filter(gene_name %in% all_kinases$symbol)
+
+differential_expression_dark_kinases = differential_expression %>%
+  filter(gene_name %in% dark_kinases$symbol)
+```
+
+### Number of Diff Expressed Genes
+
+Overall, there are `r dim(differential_expression)[1]` genes deferentially expressed. Of these, `r dim(differential_expression_kinases)[1]` are kinases and `r dim(differential_expression_dark_kinases)[1]` are understudied. To get an idea of what these differences actually look like I'll produce a few plots from some of the dark kinases with larger changes.
+
+```{r plot single cell expression, include=F}
+plot_SC_gene <- function(data_set, expression_change_props) {
+  title = glue_data(expression_change_props,
+                    "{gene_name}: {format(fold_change_inf, digits = 3)} Log2 Fold Change
+Fraction Cells Above 1 - DMSO {format(expression_pos_percent_DMSO, digits = 3)}, Tramet: {format(expression_pos_percent_Trametinib, digits = 3)}")
+  
+  SS_plot = ggplot(data_set, aes(x = norm_count, color = treatment, y = ..density..)) +
+    geom_freqpoly(bins = 30) +
+    xlim(c(0, NA)) +
+    labs(x = "Normalized Read Count",y="Fraction of Cells",color="") +
+    ggtitle(title) +
+    scale_color_brewer(type = 'div', palette = "Dark2") +
+    theme_berginski()
+  
+  return(SS_plot)
+}
+```
+### Sample Dark Kinases that Change
+
+PKMYT1 happens to one of the biggest drops after trametinib treatment:
+
+```{r PKMYT1 expression, echo = F, warning=F}
+plot_SC_gene(all_data %>% filter(gene_name == "PKMYT1"), combined_expression %>% filter(gene_name == "PKMYT1"))
+```
+
+RIOK1 also drops:
+
+```{r RIOK1 expression, echo=F, warning=F}
+plot_SC_gene(all_data %>% filter(gene_name == "RIOK1"), combined_expression %>% filter(gene_name == "RIOK1"))
+```
+
+ALPK3 goes up:
+
+```{r ALPK3 expression, echo=F, warning=F}
+plot_SC_gene(all_data %>% filter(gene_name == "ALPK3"), combined_expression %>% filter(gene_name == "ALPK3"))
+```
+
+ULK4 also goes up:
+
+```{r ULK4 expression, echo=F, warning=F}
+plot_SC_gene(all_data %>% filter(gene_name == "ULK4"), combined_expression %>% filter(gene_name == "ULK4"))
+```
+
+### All Dark Kinase Plots
+
+Here's a small multiples plot with all the differentially expression dark kinases for reference:
+
+```{r all dark kinases, echo=F, warning=F}
+DK_data = all_data %>%
+  filter(gene_name %in% differential_expression_dark_kinases$gene_name) %>%
+  # rowwise() %>%
+  # mutate(gene_name = fct_relevel(gene_name, differential_expression_dark_kinases$gene_name)) %>%
+  identity()
+
+DK_data$gene_name = factor(DK_data$gene_name, differential_expression_dark_kinases$gene_name)
+# DK_data$gene_name = fct_relevel(DK_data$gene_name, differential_expression_dark_kinases$gene_name)
+
+ggplot(DK_data,
+       aes(x = norm_count, color = treatment, y = ..density..)) +
+  geom_freqpoly() +
+  xlim(c(0, NA)) +
+  labs(x = "Normalized Read Count",y="Fraction of Cells",color="") +
+  scale_color_brewer(type = 'div', palette = "Dark2") +
+  theme_berginski() +
+  facet_wrap(~gene_name)
+```
+
+## Bulk Comparisons
+
+Now I'll try to compare these results to the DESeq2 based results. In general the single cell analysis is finding more differences at the gene level, with only a few genes being only picked up by DESeq2.
+
+```{r load and join DESeq, include=F}
+DEseq_results = read_csv(here('DESeq2_results.csv'))
+
+DEseq_results_tramet = DEseq_results %>%
+  filter(treatment == "Trametinib")
+
+combined_plus_DEseq = combined_expression %>%
+  left_join(DEseq_results_tramet, by = c('gene_name' = 'hgnc_symbol')) %>%
+  filter(! is.na(log2FoldChange) & !is.nan(fold_change_inf)) %>%
+  mutate(signif_ss = p_val_wilcox_adjust <= 0.05 & abs(fold_change_inf) >= 1,
+         signif_DESeq = padj <= 0.05 & abs(log2FoldChange) >= 1)
+```
+
+### Overall Fold Change Comparison
+
+The overall correlation is 0.78. The red line indicates the one to one line:
+
+```{r overall fold change, echo=F, warning=F}
+ggplot(combined_plus_DEseq, aes(x=fold_change_inf,y=log2FoldChange)) +
+  geom_hex() +
+  geom_abline(slope = 1, intercept = 0, color='red') +
+  labs(x="Single Cell Fold Change", y="DESeq Fold Change", fill="") +
+  theme_berginski()
+```
+
+### Overlap with All Differentially Expressed Genes
+
+```{r all genes upset, echo=F, warning=F}
+library(ggupset)
+
+ggupset_combined = rbind(
+  combined_plus_DEseq %>% filter(signif_ss) %>% select(gene_name) %>% mutate(Method = "Single Cell Analysis"),
+  combined_plus_DEseq %>% filter(signif_DESeq) %>% select(gene_name) %>% mutate(Method = "Bulk Analysis")
+) %>% distinct() %>% 
+  group_by(gene_name) %>%
+  summarize(Methods = list(Method), .groups="drop")
+
+ggplot(ggupset_combined, aes(x = Methods)) +
+  geom_bar() +
+  scale_x_upset(n_intersections = 20) +
+  labs(x="", y="Number of Genes") +
+  theme_berginski()
+```
+
+### Overlap with Kinase Differentially Expressed Genes
+
+```{r just kinases upset, echo=F, warning=F}
+library(ggupset)
+
+ggupset_combined = rbind(
+  combined_plus_DEseq %>% filter(signif_ss, gene_name %in% all_kinases$symbol) %>% select(gene_name) %>% mutate(Method = "Single Cell Analysis"),
+  combined_plus_DEseq %>% filter(signif_DESeq, gene_name %in% all_kinases$symbol) %>% select(gene_name) %>% mutate(Method = "Bulk Analysis")
+) %>% distinct() %>% 
+  group_by(gene_name) %>%
+  summarize(Methods = list(Method), .groups="drop")
+
+ggplot(ggupset_combined, aes(x = Methods)) +
+  geom_bar() +
+  scale_x_upset(n_intersections = 20) +
+  labs(x="", y="Number of Kinases") +
+  theme_berginski()
+```
+
+### Overlap with Dark Kinase Differentially Expressed Genes
+
+```{r just dark kinases upset, echo=F, warning=F}
+library(ggupset)
+
+ggupset_combined = rbind(
+  combined_plus_DEseq %>% filter(signif_ss, gene_name %in% dark_kinases$symbol) %>% select(gene_name) %>% mutate(Method = "Single Cell Analysis"),
+  combined_plus_DEseq %>% filter(signif_DESeq, gene_name %in% dark_kinases$symbol) %>% select(gene_name) %>% mutate(Method = "Bulk Analysis")
+) %>% distinct() %>% 
+  group_by(gene_name) %>%
+  summarize(Methods = list(Method), .groups="drop")
+
+ggplot(ggupset_combined, aes(x = Methods)) +
+  geom_bar() +
+  scale_x_upset(n_intersections = 20) +
+  labs(x="", y="Number of Dark Kinases") +
+  theme_berginski()
+```
