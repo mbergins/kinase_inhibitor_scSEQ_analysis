@@ -2,3 +2,5 @@
 .Rhistory
 .RData
 .Ruserdata
+
+analysis_reports/*/*_cache
